@@ -1,0 +1,133 @@
+# Carregar bibliotecas
+library(sf)        # Manipulação de shapefiles
+library(gstat)     # Variograma e krigagem
+library(raster)    # Rasterização dos dados
+library(sp)        # Manipulação espacial
+library(dplyr)     # Manipulação de dados
+library(ggplot2)   # Visualização
+library(lubridate) # Manipulação de datas
+library(geoR)      # Para análise geoestatística detalhada
+
+
+# ------------------------------------------------------------------
+# 0. ABRIR OS DADOS DE FOCOS DE CALOR
+# ------------------------------------------------------------------
+
+# Ler shapefile dos focos de calor
+focos <- st_read("./focos_qmd_inpe_2020-09-01_2020-09-30_04.shp")
+focos <- st_transform(focos, crs = 31983)
+
+# Adicionar contagem de focos por dia
+focos$Data <- as.Date(focos$Data)
+focos_dia <- focos %>%
+  group_by(Data) %>%
+  summarise(total_focos = n(), dias_sem_chuva = max(DiaSemChuv, na.rm = TRUE))
+
+print(focos_dia)
+
+# Associar contagem de focos a tabela original
+focos$contagem <- focos_dia$total_focos[match(focos$Data, focos_dia$Data)]
+focos$dias_sem_chuva <- focos_dia$dias_sem_chuva[match(focos$Data, focos_dia$Data)]
+
+# Converter para SpatialPointsDataFrame
+focos_sp <- as(focos, "Spatial")
+
+# ------------------------------------------------------------------
+# 2. RESÍDUOS ESPACIALMENTE CORRELACIONADOS
+# ------------------------------------------------------------------
+tocantins <- sf::read_sf("./SIGLA_UF_TO.shp")
+tocantins <- sf::st_transform(tocantins, crs = 31983)
+
+# Ajustar um modelo de regressão linear simples 
+modelo_focos <- lm(total_focos ~ 1, data = focos_dia)
+summary(modelo_focos)
+
+# O intercepto do modelo é a média dos valores observados
+media_dias <- mean(focos_dia$total_focos)
+print(paste("Média de Dias Sem Chuva: ", media_dias))
+
+# Calcular os resíduos
+residuos <- media_dias - focos_dia$total_focos
+
+# Associar os resíduos a tabela original
+focos_dia$residuos <- residuos
+
+# Histograma dos resíduos
+hist(residuos, main = "Distribuição dos Resíduos", xlab = "Resíduos", col = "skyblue", border = "white")
+
+# Visualizar os resíduos
+plot(focos_dia["residuos"],
+     main = "Distribuição espacial dos resíduos",
+     pch = 20, reset = FALSE)
+plot(st_geometry(focos_dia), add = TRUE, col = "transparent")
+plot(tocantins, col = "transparent", add = TRUE)
+
+print (residuos)
+
+# Criar classes para os resíduos
+focos_dia$residuos_classe <- cut(focos_dia$residuos, 
+                                 breaks = c(-Inf, -20, -10, 0, 10, 20, Inf), 
+                                 labels = c("< -20", "-20 a -10", "-10 a 0", "0 a 10", "10 a 20", "> 20"),
+                                 ordered = TRUE)
+
+# Verificar se as classes foram criadas corretamente
+print(table(focos_dia$residuos_classe))
+
+# ------------------------------------------------------------------
+# 3. NUVEM SEMIVARIOGRAFICA
+# ------------------------------------------------------------------
+
+# Extrair coordenadas e resíduos
+coords <- st_coordinates(focos_dia)
+residuos <- focos_dia$residuos
+
+# Calcular semivariância entre pares de pontos
+distancia <- as.vector(dist(coords))
+semivarian <- as.vector(dist(residuos)^2)
+
+# Identificar pares dentro de 1/3 da maior distância
+distancia_max <- max(distancia) / 3
+id_selected <- which(distancia < distancia_max)
+
+# Criar nuvem semivariográfica
+variogram_cloud <- data.frame(
+  semivariance = semivarian[id_selected],
+  separation = distancia[id_selected]
+)
+
+# Plotar nuvem semivariográfica
+plot(
+  semivariance ~ separation, data = variogram_cloud,
+  xlab = "Distância de separação (m)",
+  ylab = "(Semi)Variância",
+  main = "Nuvem Semivariográfica - Resíduos",
+  cex = 0.5
+)
+grid()
+
+# Definir classes de distância de separação
+hist(focos_dia[["total_focos"]])
+separation_classes <- seq(0, distancia_max, length.out = 10)
+abline(v = separation_classes, col = "red")
+
+# Criar classes de distância e calcular medianas
+classes <- seq(0, distancia_max, length.out = 10)
+variogram_cloud$classe <- cut(variogram_cloud$separation, breaks = classes)
+variogram_cloud <- variogram_cloud[!is.na(variogram_cloud$classe), ]
+semivariance_med <- tapply(variogram_cloud$semivariance, variogram_cloud$classe, median, na.rm = TRUE)
+separation_med <- tapply(variogram_cloud$separation, variogram_cloud$classe, median, na.rm = TRUE)
+
+# Criar semivariograma amostral
+variogram_sample <- data.frame(separation = separation_med, semivariance = semivariance_med)
+print (head(semivariance_med))
+
+# Plotar semivariograma amostral
+plot(
+  semivariance ~ separation, data = variogram_sample,
+  xlab = "Distância de separação",
+  ylab = "Semivariância",
+  main = "Semivariograma Amostral - Resíduos",
+  col = "blue", pch = 20
+)
+lines(variogram_sample$separation, variogram_sample$semivariance, col = "blue")
+grid()
