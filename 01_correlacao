@@ -1,0 +1,49 @@
+# Carregar bibliotecas
+library(sf)        # Manipulação de shapefiles
+library(gstat)     # Variograma e krigagem
+library(raster)    # Rasterização dos dados
+library(sp)        # Manipulação espacial
+library(dplyr)     # Manipulação de dados
+library(ggplot2)   # Visualização
+library(lubridate) # Manipulação de datas
+library(geoR)      # Para análise geoestatística detalhada
+
+
+# ------------------------------------------------------------------
+# 0. ABRIR OS DADOS DE FOCOS DE CALOR
+# ------------------------------------------------------------------
+
+# Ler shapefile dos focos de calor
+focos <- st_read("./focos_qmd_inpe_2020-09-01_2020-09-30_04.shp")
+focos <- st_transform(focos, crs = 31983)
+
+# Adicionar contagem de focos por dia
+focos$Data <- as.Date(focos$Data)
+focos_dia <- focos %>%
+  group_by(Data) %>%
+  summarise(total_focos = n(), dias_sem_chuva = max(DiaSemChuv, na.rm = TRUE))
+
+print(focos_dia)
+
+# Associar contagem de focos a tabela original
+focos$contagem <- focos_dia$total_focos[match(focos$Data, focos_dia$Data)]
+focos$dias_sem_chuva <- focos_dia$dias_sem_chuva[match(focos$Data, focos_dia$Data)]
+
+# Converter para SpatialPointsDataFrame
+focos_sp <- as(focos, "Spatial")
+
+# ------------------------------------------------------------------
+# 1. CALCULAR A CORRELAÇÃO ENTRE OS DADOS
+# ------------------------------------------------------------------
+
+# Calcular correlação entre número de focos e média de dias sem chuva
+correlacao <- cor(focos_dia$total_focos, focos_dia$dias_sem_chuva, use = "complete.obs")
+print(paste("Correlação entre Número de Focos e Média de Dias sem Chuva: ", round(correlacao, 3)))
+
+# Plotar relação entre número de focos e dias sem chuva
+ggplot(focos_dia, aes(x = dias_sem_chuva, y = total_focos)) +
+  geom_point(color = "steelblue", alpha = 0.7) +
+  geom_smooth(method = "lm", col = "red") +
+  labs(title = "Relação entre dias sem chuva e número de focos de calor",
+       x = "Média de Dias sem Chuva", y = "Número de Focos de Calor") +
+  theme_minimal()
