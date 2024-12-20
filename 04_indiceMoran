@@ -1,0 +1,103 @@
+# Carregar bibliotecas
+library(sf)        # Manipulação de shapefiles
+library(gstat)     # Variograma e krigagem
+library(raster)    # Rasterização dos dados
+library(sp)        # Manipulação espacial
+library(dplyr)     # Manipulação de dados
+library(ggplot2)   # Visualização
+library(lubridate) # Manipulação de datas
+library(geoR)      # Para análise geoestatística detalhada
+
+
+# ------------------------------------------------------------------
+# 0. ABRIR OS DADOS DE FOCOS DE CALOR
+# ------------------------------------------------------------------
+
+# Ler shapefile dos focos de calor
+focos <- st_read("./focos_qmd_inpe_2020-09-01_2020-09-30_04.shp")
+focos <- st_transform(focos, crs = 31983)
+
+# Adicionar contagem de focos por dia
+focos$Data <- as.Date(focos$Data)
+focos_dia <- focos %>%
+  group_by(Data) %>%
+  summarise(total_focos = n(), dias_sem_chuva = max(DiaSemChuv, na.rm = TRUE))
+
+print(focos_dia)
+
+# Associar contagem de focos a tabela original
+focos$contagem <- focos_dia$total_focos[match(focos$Data, focos_dia$Data)]
+focos$dias_sem_chuva <- focos_dia$dias_sem_chuva[match(focos$Data, focos_dia$Data)]
+
+# Converter para SpatialPointsDataFrame
+focos_sp <- as(focos, "Spatial")
+
+# ------------------------------------------------------------------
+# 6. RELAÇÃO COM USO E COBERTURA DA TERRA
+# ------------------------------------------------------------------
+# Carregar o mapa de uso e cobertura da terra
+uso_cob <- raster("./mapbiomas-brazil-collection-90-tocantinsto-2020-2.tif")
+
+# Verificar o CRS do raster de uso e cobertura
+crs_uso <- crs(uso_cob)
+print(crs_uso)
+
+# Verificar o CRS dos focos de calor
+crs_focos <- st_crs(focos)
+print(crs_focos)
+
+# Transformar os focos de calor para o mesmo CRS do raster (se necessário)
+if (st_crs(focos)$proj4string != crs_uso@projargs) {
+  focos <- st_transform(focos, crs = crs_uso@projargs)
+}
+print(crs_focos)
+
+# Extrair os valores de uso e cobertura para cada ponto
+focos_sf <- st_as_sf(focos) 
+valores_uso <- raster::extract(uso_cob, focos_sf, df = TRUE)
+
+# Adicionar os valores de uso/cobertura aos focos de calor
+focos_sf$uso_cobertura <- valores_uso[, 2]
+
+# Verificar os dados
+print(head(focos_sf))
+
+# Estimar o primeiro e o último foco por classe
+primeiro_foco <- focos_sf %>%
+  group_by(uso_cobertura) %>%
+  summarise(
+    primeiro_dia = min(Data, na.rm = TRUE),
+    ultimo_dia = max(Data, na.rm = TRUE),
+    intervalo = as.numeric(ultimo_dia - primeiro_dia),
+    risco = mean(RiscoFogo)
+  )
+
+# Verificar os resultados
+print(primeiro_foco)
+
+# ------------------------------------------------------------------
+# 6. MORAN LOCAL
+# ------------------------------------------------------------------
+library(spdep)
+
+# Criar uma lista de vizinhança baseada nas coordenadas
+coords <- st_coordinates(focos_sf)  # Extrai as coordenadas
+nb <- knn2nb(knearneigh(coords, k = 8))  # Define os vizinhos mais próximos (k = 8)
+
+# Converter a lista de vizinhança em uma matriz de pesos espaciais
+lw <- nb2listw(nb, style = "W")  # Estilo de normalização: "W" para pesos normalizados
+
+# Calcular o I de Moran Local para uso_num
+local_moran_uso <- localmoran(focos_sf$uso_num, lw)
+
+# Adicionar resultados ao objeto sf
+focos_sf$lisa_uso <- local_moran_uso[, "Ii"]  # Estatística local
+focos_sf$signif_uso <- local_moran_uso[, "Pr(z != E(Ii))"] < 0.05  # Significância (p < 0.05)
+
+# Calcular a média do moran por classe de uso
+media_por_classe <- focos_sf %>%
+  group_by(uso_cobertura) %>%
+  summarise(media_lisa_uso = mean(lisa_uso, na.rm = TRUE))
+
+# Exibir a tabela
+print(media_por_classe)
